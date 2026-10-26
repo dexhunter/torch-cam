@@ -192,19 +192,20 @@ class GradCAMpp(_GradCAM):
         # Keep powers, spatial sums, and epsilon representable for reduced-precision inputs.
         gradients = [grad.to(dtype=torch.promote_types(grad.dtype, torch.float32)) for grad in hook_g]
         # Alpha coefficient for each pixel
-        grad_2 = [grad.pow(2) for grad in gradients]
+        grad_2 = [grad.square() for grad in gradients]
         grad_3 = [g2 * grad for g2, grad in zip(grad_2, gradients, strict=True)]
         # Watch out for NaNs produced by underflow
         spatial_dims = hook_a[0].ndim - 2
         denom = [
-            2 * g2 + g3 * act.flatten(2).sum(-1, dtype=g2.dtype)[(...,) + (None,) * spatial_dims]
+            (2 * g2).add_(g3.mul_(act.flatten(2).sum(-1, dtype=g2.dtype).view(act.shape[:2] + (1,) * spatial_dims)))
             for g2, g3, act in zip(grad_2, grad_3, hook_a, strict=True)
         ]
         nan_mask = [g2 > 0 for g2 in grad_2]
         alpha = grad_2
         for idx, d, mask in zip(range(len(grad_2)), denom, nan_mask, strict=True):
-            # Indexed assignment writes back; calling div_ on the indexed copy does not.
-            alpha[idx][mask] /= d[mask] + eps
+            # Keep masked coefficients unchanged and avoid division by zero outside the mask.
+            divisor = d.add_(eps).masked_fill_(mask.logical_not_(), 1)
+            alpha[idx].div_(divisor)
 
         # Apply pixel coefficient in each weight
         return [a.mul_(torch.relu(grad)).flatten(2).sum(-1) for a, grad in zip(alpha, gradients, strict=True)]
